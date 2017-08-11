@@ -17,7 +17,6 @@
 package org.gradle.cache
 
 import org.gradle.integtests.fixtures.AbstractIntegrationSpec
-import org.gradle.integtests.fixtures.daemon.DaemonLogsAnalyzer
 import org.gradle.util.Requires
 import org.gradle.util.TestPrecondition
 
@@ -28,35 +27,55 @@ class ConcurrentBuildsFileLockingIntegrationTest extends AbstractIntegrationSpec
     //
     // LockMode.None = Lock on first use, release on demand
     //
-    // The test simulates a non-responsive daemon by suspending the daemon JVM process.
-    @Requires(TestPrecondition.UNIX_DERIVATIVE)
-    def "a suspended daemon does not block the shared file hash cache"() {
+    // The test simulates a non-responsive daemon by putting memory pressure on the daemon JVM process.
+    def "a daemon under heavy load does not block the shared file hash cache"() {
+        testDirectoryProvider.suppressCleanup()
+
         given:
         executer.requireDaemon()
-        buildFile << ""
+        buildFile << """
+            task workHard() { doLast {
+                (1..10).each {
+                    int no = it
+                    new Thread() { 
+                        void run() {
+                            int count = 0
+                            def objects = []
+                            while(true) {
+                                count++
+                                if (count == 100 * 100000) {
+                                    count = 0
+                                    objects.clear()
+                                }
+                                objects.add(new Object())
+                            }
+                        }
+                    }.start()
+                }
+                Thread.sleep(10 * 60 * 1000)
+            }}
+        """
 
         when:
-        executer.withDaemonBaseDir(file("daemon1")).withArguments("-d")
-        succeeds "help"
+        executer.withDaemonBaseDir(file("daemon1")).withBuildJvmOpts("-Xmx64m").withArguments("-d")
+        executer.withTasks("workHard").start()
+        Thread.sleep(8000)
 
-        def daemon1Pid = DaemonLogsAnalyzer.newAnalyzer(executer.daemonBaseDir).daemon.context.pid
-        "kill -SIGSTOP $daemon1Pid".execute() //put the first daemon to sleep
-        Thread.sleep(500)
-
-        executer.withDaemonBaseDir(file("daemon2")).withArguments("-d")
+        executer.withDaemonBaseDir(file("daemon2")).withBuildJvmOpts("-Xmx1024m").withArguments("-d") //.withBuildJvmOpts('-Xdebug','-Xrunjdwp:transport=dt_socket,server=y,suspend=y,address=5015')
 
         then:
         succeeds "help"
     }
+
 
     // = artifact cache / artifact transform cache- runs in build session =
     // The lock lives in build session scope; it is initially acquired with the first dependency resolution
     //
     // LockMode.None = Lock on first use, release on demand
     //
-    // The test simulates a non-responsive daemon by suspending the daemon JVM process.
+    // The test simulates a non-responsive daemon by putting memory pressure on the daemon JVM process.
     @Requires(TestPrecondition.UNIX_DERIVATIVE)
-    def "a suspended daemon does not block the artifact cache"() {
+    def "a daemon under heavy load does not block the artifact cache"() {
         given:
         executer.requireDaemon()
 
@@ -65,27 +84,37 @@ class ConcurrentBuildsFileLockingIntegrationTest extends AbstractIntegrationSpec
             configurations { conf }
             dependencies { conf "junit:junit:4.12" }
             task resolve { doLast { println configurations.conf.files } }
-            task loopForever { doLast { while(true) { Thread.sleep(1000) } } }
+            task workHard() { doLast {
+                (1..10).each {
+                    int no = it
+                    new Thread() { 
+                        void run() {
+                            int count = 0
+                            def objects = []
+                            while(true) {
+                                count++
+                                if (count == 100 * 100000) {
+                                    count = 0
+                                    objects.clear()
+                                }
+                                objects.add(new Object())
+                            }
+                        }
+                    }.start()
+                }
+                Thread.sleep(10 * 60 * 1000)
+            }}
         """
 
         when:
-        executer.withDaemonBaseDir(file("daemon1")).withArguments("-d")
-        def b1 = executer.withTasks("resolve", "loopForever").start()
+        executer.withDaemonBaseDir(file("daemon1")).withBuildJvmOpts("-Xmx64m").withArguments("-d")
+        executer.withTasks("resolve", "workHard").start()
+        Thread.sleep(8000)
 
-        def daemonsFixture = DaemonLogsAnalyzer.newAnalyzer(executer.daemonBaseDir)
-        while (daemonsFixture.daemons.isEmpty()) {
-            Thread.sleep(500)
-        }
-        def daemon1Pid = daemonsFixture.daemon.context.pid
-
-        buildFile << """
-            task suspendOtherDaemon { doLast { "kill -SIGSTOP $daemon1Pid".execute() } }
-        """
-
-        executer.withDaemonBaseDir(file("daemon2")).withArguments("-d")
+        executer.withDaemonBaseDir(file("daemon2")).withBuildJvmOpts("-Xmx1024m").withArguments("-d")
 
         then:
-        succeeds "suspendOtherDaemon", "resolve"
+        succeeds "resolve"
     }
 
     // = workerMain classpath cache =
