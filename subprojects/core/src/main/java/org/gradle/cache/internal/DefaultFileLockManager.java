@@ -112,6 +112,7 @@ public class DefaultFileLockManager implements FileLockManager {
         private LockState lockState;
         private int port;
         private final long lockId;
+        private int lastPortPinged = -1;
 
         public DefaultFileLock(File target, LockOptions options, String displayName, String operationDisplayName, int port) throws Throwable {
             this.port = port;
@@ -329,15 +330,19 @@ public class DefaultFileLockManager implements FileLockManager {
                 public java.nio.channels.FileLock run() throws IOException, InterruptedException {
                     java.nio.channels.FileLock fileLock = lockFileAccess.tryLockState(lockMode == LockMode.Shared);
                     if (fileLock != null) {
+                        lastPortPinged = -1;
                         return fileLock;
                     }
                     if (port != -1) { //we don't like the assumption about the port very much
                         LockInfo lockInfo = readInformationRegion(timer);
-                        if (lockInfo.port != -1) {
+                        if (lockInfo.port == -1) {
+                            LOGGER.debug("The file lock is held by a different Gradle process. I was unable to read on which port the owner listens for lock access requests.");
+                        } else if (lockInfo.port == lastPortPinged) {
+                            LOGGER.debug("The file lock is held by a different Gradle process (pid: {}, operation: {}). Which we already pinged at port {} (processing seems to take longer on the other side)", lockInfo.pid, lockInfo.operation, lockInfo.port);
+                        } else {
                             LOGGER.debug("The file lock is held by a different Gradle process (pid: {}, operation: {}). Will attempt to ping owner at port {}", lockInfo.pid, lockInfo.operation, lockInfo.port);
                             fileLockContentionHandler.pingOwner(lockInfo.port, lockInfo.lockId, displayName);
-                        } else {
-                            LOGGER.debug("The file lock is held by a different Gradle process. I was unable to read on which port the owner listens for lock access requests.");
+                            lastPortPinged = lockInfo.port;
                         }
                     }
                     return null;
